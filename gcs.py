@@ -267,6 +267,14 @@ class ChaChaGCS:
             print(f"[ERROR] receive_message: {e}")
             return None
 
+    def set_mode(self, mode_name: str):
+        base_mode = 0
+        custom_mode = _mode_id(self.master, mode_name)
+        self.master.set_mode(custom_mode, base_mode=base_mode)
+        # algunos firmwares responden con COMMAND_ACK (MAV_CMD_DO_SET_MODE)
+        self._wait_command_ack(mavutil.mavlink.MAV_CMD_DO_SET_MODE, 3.0)
+        print(f"[MODE] solicitado {mode_name}")
+
     
     def run(self):
         """Loop principal"""
@@ -350,6 +358,11 @@ def main():
     try:
         gcs.connect()
         gcs.init_crypto(KEY_HEX, IV_HEX)
+
+        print("\n[COMMANDS] Sending basic commands...\n")
+        gcs.set_mode('GUIDED')
+
+
         gcs.run()
     except KeyboardInterrupt:
         print("\n[GCS] Interrupted by user")
