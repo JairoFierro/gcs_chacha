@@ -638,8 +638,11 @@ def main():
     print("Copy KEY and IV_boot from ArduPilot console")
     print()
     
-    KEY_HEX = input("Enter KEY (hex): ").strip()
-    IV_HEX = input("Enter IV_boot (hex): ").strip()
+    # KEY_HEX = input("Enter KEY (hex): ").strip()
+    # IV_HEX = input("Enter IV_boot (hex): ").strip()
+
+    KEY_HEX = "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
+    IV_HEX = "aabbccddeeff0011"
     
     if len(KEY_HEX) != 64 or len(IV_HEX) != 16:
         print("❌ Invalid key/IV length")
