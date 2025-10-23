@@ -245,21 +245,28 @@ class ChaChaGCS:
     def receive_message(self):
         """Recibir y descifrar un mensaje"""
         try:
-            # Leer header MAVLink v2
             header = self.sock.recv(MAVLINK_V2_HDR_LEN)
             if len(header) < MAVLINK_V2_HDR_LEN:
                 return None
-            
-            # ===== AGREGAR ESTO PARA DEBUG =====
+
             print(f"[DEBUG] Received header: {binascii.hexlify(header).decode()}")
-            # ===================================
-                
+
             if header[0] != MAVLINK_V2_STX:
                 print(f"[DEBUG] Not MAVLink v2 (STX={header[0]:02x})")
                 return None
-            
+
             payload_len = header[1]
             print(f"[DEBUG] Payload length: {payload_len}")
+            # Aquí podrías continuar leyendo el payload luego...
+            return header
+
+        except socket.timeout:
+            # Si no llega nada, simplemente continúa el loop
+            return None
+        except Exception as e:
+            print(f"[ERROR] receive_message: {e}")
+            return None
+
     
     def run(self):
         """Loop principal"""
