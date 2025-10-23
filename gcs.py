@@ -242,24 +242,24 @@ class ChaChaGCS:
         """Inicializar cifrado con claves de ArduPilot"""
         self.ctx.init(key_hex, iv_hex)
         
-def receive_message(self):
-    """Recibir y descifrar un mensaje"""
-    try:
-        # Leer header MAVLink v2
-        header = self.sock.recv(MAVLINK_V2_HDR_LEN)
-        if len(header) < MAVLINK_V2_HDR_LEN:
-            return None
-        
-        # ===== AGREGAR ESTO PARA DEBUG =====
-        print(f"[DEBUG] Received header: {binascii.hexlify(header).decode()}")
-        # ===================================
+    def receive_message(self):
+        """Recibir y descifrar un mensaje"""
+        try:
+            # Leer header MAVLink v2
+            header = self.sock.recv(MAVLINK_V2_HDR_LEN)
+            if len(header) < MAVLINK_V2_HDR_LEN:
+                return None
             
-        if header[0] != MAVLINK_V2_STX:
-            print(f"[DEBUG] Not MAVLink v2 (STX={header[0]:02x})")
-            return None
-        
-        payload_len = header[1]
-        print(f"[DEBUG] Payload length: {payload_len}")
+            # ===== AGREGAR ESTO PARA DEBUG =====
+            print(f"[DEBUG] Received header: {binascii.hexlify(header).decode()}")
+            # ===================================
+                
+            if header[0] != MAVLINK_V2_STX:
+                print(f"[DEBUG] Not MAVLink v2 (STX={header[0]:02x})")
+                return None
+            
+            payload_len = header[1]
+            print(f"[DEBUG] Payload length: {payload_len}")
     
     def run(self):
         """Loop principal"""
