@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 GCS Python con soporte ChaCha20-Poly1305 para MAVLink v2
-Basado en el prototipo de cifrado validado
+Con capacidad de enviar comandos al dron
 """
 
 import socket
@@ -9,9 +9,8 @@ import struct
 import binascii
 import time
 import sys
+import threading
 from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
-from pymavlink import mavutil
-from pymavlink.dialects.v20 import common as mavlink2
 
 # =============================================================================
 # CONSTANTES
@@ -24,6 +23,30 @@ MAVLINK_IFLAG_SIGNED = 0x01
 CHACHA_KEY_LEN = 32
 CHACHA_NONCE_LEN = 12
 CHACHA_TAG_LEN = 16
+
+# MAVLink message IDs
+MAVLINK_MSG_ID_HEARTBEAT = 0
+MAVLINK_MSG_ID_COMMAND_LONG = 76
+MAVLINK_MSG_ID_SET_MODE = 11
+MAVLINK_MSG_ID_PARAM_REQUEST_READ = 20
+MAVLINK_MSG_ID_MISSION_REQUEST_LIST = 43
+
+# MAV_CMD commands
+MAV_CMD_NAV_TAKEOFF = 22
+MAV_CMD_NAV_LAND = 21
+MAV_CMD_NAV_RETURN_TO_LAUNCH = 20
+MAV_CMD_COMPONENT_ARM_DISARM = 400
+MAV_CMD_DO_SET_MODE = 176
+
+# Flight modes (ArduCopter)
+COPTER_MODE_STABILIZE = 0
+COPTER_MODE_ACRO = 1
+COPTER_MODE_ALT_HOLD = 2
+COPTER_MODE_AUTO = 3
+COPTER_MODE_GUIDED = 4
+COPTER_MODE_LOITER = 5
+COPTER_MODE_RTL = 6
+COPTER_MODE_LAND = 9
 
 # =============================================================================
 # CONTEXTO DE CIFRADO
@@ -50,7 +73,7 @@ class ChaChaContext:
         print(f"[CHACHA] IV:  {iv_boot_hex}")
 
 # =============================================================================
-# FUNCIONES DE CIFRADO (del prototipo validado)
+# FUNCIONES DE CIFRADO
 # =============================================================================
 
 def build_aad_v2(len_field, incompat_flags, compat_flags, seq, sysid, compid, msgid):
@@ -122,18 +145,16 @@ def decrypt_mavlink_message(ctx, msg_bytes):
     try:
         plaintext = cipher.decrypt(nonce, ciphertext_with_tag, aad)
         ctx.stats['decrypted'] += 1
-        print(f"[DECRYPT] msgid={msgid:3d} sysid={sysid} seq={seq:3d} | {get_msgid_name(msgid)}")
+        print(f"[DECRYPT] ✅ msgid={msgid:3d} sysid={sysid} seq={seq:3d} | {get_msgid_name(msgid)}")
     except Exception as e:
         ctx.stats['decrypt_failed'] += 1
-        print(f"[DECRYPT] msgid={msgid:3d} sysid={sysid} seq={seq:3d} | FAILED")
+        print(f"[DECRYPT] ❌ msgid={msgid:3d} sysid={sysid} seq={seq:3d} | FAILED")
         return None
     
-    # Reconstruir mensaje descifrado
     out = bytearray(msg_bytes[0:MAVLINK_V2_HDR_LEN])
     out[1] = len(plaintext)
     out.extend(plaintext)
     
-    # CRC (usar crc_extra correcto según msgid)
     crc_extra = get_crc_extra(msgid)
     crc = crc16_mavlink(plaintext, crc_extra)
     out.append(crc & 0xFF)
@@ -182,6 +203,7 @@ def encrypt_mavlink_message(ctx, msg_bytes):
     out.append((crc >> 8) & 0xFF)
     
     ctx.stats['encrypted'] += 1
+    print(f"[ENCRYPT] 📤 msgid={msgid} sysid={sysid} seq={seq}")
     return bytes(out)
 
 # =============================================================================
@@ -193,30 +215,118 @@ def get_msgid_name(msgid):
     names = {
         0: "HEARTBEAT",
         1: "SYS_STATUS",
+        11: "SET_MODE",
         24: "GPS_RAW_INT",
         30: "ATTITUDE",
         33: "GLOBAL_POSITION_INT",
         74: "VFR_HUD",
         76: "COMMAND_LONG",
+        77: "COMMAND_ACK",
         110: "NAMED_VALUE_FLOAT",
         253: "STATUSTEXT",
     }
     return names.get(msgid, f"UNKNOWN_{msgid}")
 
 def get_crc_extra(msgid):
-    """CRC extra para validación (algunos ejemplos)"""
+    """CRC extra para validación"""
     crc_extras = {
         0: 50,    # HEARTBEAT
         1: 124,   # SYS_STATUS
+        11: 89,   # SET_MODE
         24: 24,   # GPS_RAW_INT
         30: 39,   # ATTITUDE
         33: 104,  # GLOBAL_POSITION_INT
         74: 20,   # VFR_HUD
         76: 152,  # COMMAND_LONG
+        77: 143,  # COMMAND_ACK
         110: 252, # NAMED_VALUE_FLOAT
         253: 83,  # STATUSTEXT
     }
     return crc_extras.get(msgid, 0)
+
+# =============================================================================
+# BUILDERS DE MENSAJES MAVLink
+# =============================================================================
+
+def build_heartbeat(sysid=255, compid=190, seq=0):
+    """Construir mensaje HEARTBEAT"""
+    msg = bytearray()
+    msg.append(MAVLINK_V2_STX)
+    msg.append(9)   # payload length
+    msg.append(0)   # incompat_flags
+    msg.append(0)   # compat_flags
+    msg.append(seq & 0xFF)
+    msg.append(sysid)
+    msg.append(compid)
+    msg.append(0)   # msgid (HEARTBEAT)
+    msg.append(0)
+    msg.append(0)
+    
+    # Payload: MAV_TYPE_GCS(6), MAV_AUTOPILOT_INVALID(8), base_mode(0), custom_mode(0), system_status(0)
+    payload = struct.pack('<IBBBB', 0, 6, 8, 0, 0)
+    msg.extend(payload)
+    
+    crc = crc16_mavlink(payload, 50)  # CRC_EXTRA para HEARTBEAT
+    msg.append(crc & 0xFF)
+    msg.append((crc >> 8) & 0xFF)
+    
+    return bytes(msg)
+
+def build_command_long(command, param1=0, param2=0, param3=0, param4=0, 
+                       param5=0, param6=0, param7=0, 
+                       target_sysid=1, target_compid=1, 
+                       sysid=255, compid=190, seq=0):
+    """Construir mensaje COMMAND_LONG"""
+    msg = bytearray()
+    msg.append(MAVLINK_V2_STX)
+    msg.append(33)  # payload length
+    msg.append(0)   # incompat_flags
+    msg.append(0)   # compat_flags
+    msg.append(seq & 0xFF)
+    msg.append(sysid)
+    msg.append(compid)
+    msg.append(76)  # msgid COMMAND_LONG
+    msg.append(0)
+    msg.append(0)
+    
+    # Payload
+    payload = struct.pack('<fffffffHBBB',
+                         param1, param2, param3, param4,
+                         param5, param6, param7,
+                         command,
+                         target_sysid, target_compid,
+                         0)  # confirmation
+    msg.extend(payload)
+    
+    crc = crc16_mavlink(payload, 152)  # CRC_EXTRA para COMMAND_LONG
+    msg.append(crc & 0xFF)
+    msg.append((crc >> 8) & 0xFF)
+    
+    return bytes(msg)
+
+def build_set_mode(custom_mode, base_mode=1, target_sysid=1, sysid=255, compid=190, seq=0):
+    """Construir mensaje SET_MODE"""
+    msg = bytearray()
+    msg.append(MAVLINK_V2_STX)
+    msg.append(6)   # payload length
+    msg.append(0)   # incompat_flags
+    msg.append(0)   # compat_flags
+    msg.append(seq & 0xFF)
+    msg.append(sysid)
+    msg.append(compid)
+    msg.append(11)  # msgid SET_MODE
+    msg.append(0)
+    msg.append(0)
+    
+    # Payload
+    payload = struct.pack('<IBB', custom_mode, target_sysid, base_mode)
+    msg.extend(payload)
+    
+    crc = crc16_mavlink(payload, 89)  # CRC_EXTRA para SET_MODE
+    msg.append(crc & 0xFF)
+    msg.append((crc >> 8) & 0xFF)
+    
+    return bytes(msg)
 
 # =============================================================================
 # CLASE GCS
@@ -229,6 +339,15 @@ class ChaChaGCS:
         self.sock = None
         self.ctx = ChaChaContext()
         self.running = False
+        self.seq = 0
+        self.sysid = 255
+        self.compid = 190
+        
+    def get_next_seq(self):
+        """Obtener siguiente número de secuencia"""
+        seq = self.seq
+        self.seq = (self.seq + 1) % 256
+        return seq
         
     def connect(self):
         """Conectar al puerto de ArduPilot"""
@@ -236,76 +355,261 @@ class ChaChaGCS:
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.sock.connect((self.host, self.port))
         self.sock.settimeout(0.1)
-        print(f"[GCS] Connected")
+        print(f"[GCS] ✅ Connected")
         
     def init_crypto(self, key_hex, iv_hex):
         """Inicializar cifrado con claves de ArduPilot"""
         self.ctx.init(key_hex, iv_hex)
         
+    def send_message(self, msg_bytes):
+        """Enviar mensaje (cifrado si está habilitado)"""
+        if self.ctx.initialized:
+            encrypted = encrypt_mavlink_message(self.ctx, msg_bytes)
+            if encrypted:
+                self.sock.sendall(encrypted)
+            else:
+                print("[ERROR] Failed to encrypt message")
+        else:
+            self.sock.sendall(msg_bytes)
+            
     def receive_message(self):
         """Recibir y descifrar un mensaje"""
         try:
             header = self.sock.recv(MAVLINK_V2_HDR_LEN)
             if len(header) < MAVLINK_V2_HDR_LEN:
                 return None
-
-            print(f"[DEBUG] Received header: {binascii.hexlify(header).decode()}")
-
+                
             if header[0] != MAVLINK_V2_STX:
-                print(f"[DEBUG] Not MAVLink v2 (STX={header[0]:02x})")
                 return None
-
+            
             payload_len = header[1]
-            print(f"[DEBUG] Payload length: {payload_len}")
-            # Aquí podrías continuar leyendo el payload luego...
-            return header
-
+            
+            remaining = payload_len + 2
+            payload_crc = b''
+            while len(payload_crc) < remaining:
+                chunk = self.sock.recv(remaining - len(payload_crc))
+                if not chunk:
+                    return None
+                payload_crc += chunk
+            
+            full_msg = header + payload_crc
+            
+            # Intentar descifrar
+            decrypted = decrypt_mavlink_message(self.ctx, full_msg)
+            
+            return decrypted if decrypted else full_msg
+            
         except socket.timeout:
-            # Si no llega nada, simplemente continúa el loop
             return None
         except Exception as e:
-            print(f"[ERROR] receive_message: {e}")
+            print(f"[ERROR] {e}")
             return None
-
-    def set_mode(self, mode_name: str):
-        base_mode = 0
-        custom_mode = _mode_id(self.master, mode_name)
-        self.master.set_mode(custom_mode, base_mode=base_mode)
-        # algunos firmwares responden con COMMAND_ACK (MAV_CMD_DO_SET_MODE)
-        self._wait_command_ack(mavutil.mavlink.MAV_CMD_DO_SET_MODE, 3.0)
-        print(f"[MODE] solicitado {mode_name}")
-
+    
+    # =============================================================================
+    # COMANDOS DE ALTO NIVEL
+    # =============================================================================
+    
+    def send_heartbeat(self):
+        """Enviar HEARTBEAT"""
+        msg = build_heartbeat(self.sysid, self.compid, self.get_next_seq())
+        self.send_message(msg)
+        print("[CMD] 💓 Sent HEARTBEAT")
+    
+    def arm(self):
+        """Armar el dron"""
+        msg = build_command_long(
+            MAV_CMD_COMPONENT_ARM_DISARM,
+            param1=1,  # 1=arm, 0=disarm
+            target_sysid=1,
+            sysid=self.sysid,
+            compid=self.compid,
+            seq=self.get_next_seq()
+        )
+        self.send_message(msg)
+        print("[CMD] 🔓 ARM command sent")
+    
+    def disarm(self):
+        """Desarmar el dron"""
+        msg = build_command_long(
+            MAV_CMD_COMPONENT_ARM_DISARM,
+            param1=0,  # 0=disarm
+            target_sysid=1,
+            sysid=self.sysid,
+            compid=self.compid,
+            seq=self.get_next_seq()
+        )
+        self.send_message(msg)
+        print("[CMD] 🔒 DISARM command sent")
+    
+    def takeoff(self, altitude=10):
+        """Despegar a una altitud específica"""
+        msg = build_command_long(
+            MAV_CMD_NAV_TAKEOFF,
+            param7=altitude,  # altitude in meters
+            target_sysid=1,
+            sysid=self.sysid,
+            compid=self.compid,
+            seq=self.get_next_seq()
+        )
+        self.send_message(msg)
+        print(f"[CMD] 🚁 TAKEOFF to {altitude}m sent")
+    
+    def land(self):
+        """Aterrizar"""
+        msg = build_command_long(
+            MAV_CMD_NAV_LAND,
+            target_sysid=1,
+            sysid=self.sysid,
+            compid=self.compid,
+            seq=self.get_next_seq()
+        )
+        self.send_message(msg)
+        print("[CMD] 🛬 LAND command sent")
+    
+    def rtl(self):
+        """Return to Launch"""
+        msg = build_command_long(
+            MAV_CMD_NAV_RETURN_TO_LAUNCH,
+            target_sysid=1,
+            sysid=self.sysid,
+            compid=self.compid,
+            seq=self.get_next_seq()
+        )
+        self.send_message(msg)
+        print("[CMD] 🏠 RTL command sent")
+    
+    def set_mode(self, mode_name):
+        """Cambiar modo de vuelo"""
+        modes = {
+            'STABILIZE': COPTER_MODE_STABILIZE,
+            'ACRO': COPTER_MODE_ACRO,
+            'ALT_HOLD': COPTER_MODE_ALT_HOLD,
+            'AUTO': COPTER_MODE_AUTO,
+            'GUIDED': COPTER_MODE_GUIDED,
+            'LOITER': COPTER_MODE_LOITER,
+            'RTL': COPTER_MODE_RTL,
+            'LAND': COPTER_MODE_LAND,
+        }
+        
+        if mode_name.upper() not in modes:
+            print(f"[ERROR] Unknown mode: {mode_name}")
+            return
+        
+        custom_mode = modes[mode_name.upper()]
+        msg = build_set_mode(
+            custom_mode,
+            base_mode=1,
+            target_sysid=1,
+            sysid=self.sysid,
+            compid=self.compid,
+            seq=self.get_next_seq()
+        )
+        self.send_message(msg)
+        print(f"[CMD] ✈️  SET_MODE to {mode_name} sent")
+    
+    # =============================================================================
+    # LOOP PRINCIPAL
+    # =============================================================================
     
     def run(self):
-        """Loop principal"""
+        """Loop principal con interfaz de comandos"""
         print("\n" + "="*80)
-        print("GCS RUNNING - Press Ctrl+C to stop")
+        print("GCS RUNNING")
+        print("="*80)
+        print("\nAvailable commands:")
+        print("  heartbeat  - Send heartbeat")
+        print("  arm        - Arm motors")
+        print("  disarm     - Disarm motors")
+        print("  takeoff [alt] - Takeoff to altitude (default 10m)")
+        print("  land       - Land")
+        print("  rtl        - Return to launch")
+        print("  mode <name> - Set flight mode (GUIDED, AUTO, RTL, etc)")
+        print("  quit       - Exit\n")
         print("="*80 + "\n")
         
         self.running = True
-        msg_count = 0
         
+        # Thread para recibir mensajes
+        receive_thread = threading.Thread(target=self._receive_loop)
+        receive_thread.daemon = True
+        receive_thread.start()
+        
+        # Thread para enviar heartbeats periódicos
+        heartbeat_thread = threading.Thread(target=self._heartbeat_loop)
+        heartbeat_thread.daemon = True
+        heartbeat_thread.start()
+        
+        # Loop de comandos
         try:
             while self.running:
-                msg = self.receive_message()
-                if msg:
-                    msg_count += 1
+                try:
+                    cmd = input("[GCS] > ").strip().lower()
                     
-                    # Cada 10 mensajes, mostrar estadísticas
-                    if msg_count % 10 == 0:
-                        print(f"\n[STATS] Total: {msg_count} | "
-                              f"Decrypted: {self.ctx.stats['decrypted']} | "
-                              f"Failed: {self.ctx.stats['decrypt_failed']}")
-                
-                time.sleep(0.01)
+                    if not cmd:
+                        continue
+                    
+                    parts = cmd.split()
+                    command = parts[0]
+                    
+                    if command == 'quit' or command == 'exit':
+                        break
+                    elif command == 'heartbeat':
+                        self.send_heartbeat()
+                    elif command == 'arm':
+                        self.arm()
+                    elif command == 'disarm':
+                        self.disarm()
+                    elif command == 'takeoff':
+                        alt = float(parts[1]) if len(parts) > 1 else 10
+                        self.takeoff(alt)
+                    elif command == 'land':
+                        self.land()
+                    elif command == 'rtl':
+                        self.rtl()
+                    elif command == 'mode':
+                        if len(parts) < 2:
+                            print("[ERROR] Usage: mode <MODE_NAME>")
+                        else:
+                            self.set_mode(parts[1])
+                    else:
+                        print(f"[ERROR] Unknown command: {command}")
+                        
+                except EOFError:
+                    break
+                except Exception as e:
+                    print(f"[ERROR] {e}")
                 
         except KeyboardInterrupt:
             print("\n\n[GCS] Shutting down...")
-            self.stop()
+        
+        self.stop()
+    
+    def _receive_loop(self):
+        """Loop para recibir mensajes (corre en thread separado)"""
+        while self.running:
+            try:
+                msg = self.receive_message()
+                time.sleep(0.01)
+            except Exception as e:
+                if self.running:
+                    print(f"[ERROR] Receive loop: {e}")
+                break
+    
+    def _heartbeat_loop(self):
+        """Enviar heartbeat cada segundo"""
+        while self.running:
+            try:
+                self.send_heartbeat()
+                time.sleep(1)
+            except Exception as e:
+                if self.running:
+                    print(f"[ERROR] Heartbeat loop: {e}")
+                break
     
     def stop(self):
         """Detener GCS"""
         self.running = False
+        time.sleep(0.5)
         if self.sock:
             self.sock.close()
         
@@ -325,50 +629,37 @@ def main():
     print("""
 ╔══════════════════════════════════════════════════════════════════════════╗
 ║          ChaCha20-Poly1305 GCS for ArduPilot                             ║
-║          Python implementation with encryption support                    ║
+║          Python implementation with encryption & command support          ║
 ╚══════════════════════════════════════════════════════════════════════════╝
     """)
     
-    # IMPORTANTE: Usar las MISMAS claves que genera ArduPilot
-    # Copia estos valores de la consola de ArduPilot cuando arranca
-    
-    print("\n CONFIGURATION NEEDED:")
+    print("\n⚙️  CONFIGURATION:")
     print("=" * 80)
-    print("You need to copy the KEY and IV_boot from ArduPilot console output.")
-    print("Look for lines like:")
-    print("  [CHACHA] Key: 26CC9E68CCB87B88...")
-    print("  [CHACHA] IV_boot: 2AAB9CF2EE2DB5D0")
+    print("Copy KEY and IV_boot from ArduPilot console")
     print()
     
-    # EJEMPLO - REEMPLAZAR con valores reales de ArduPilot
     KEY_HEX = input("Enter KEY (hex): ").strip()
     IV_HEX = input("Enter IV_boot (hex): ").strip()
     
     if len(KEY_HEX) != 64 or len(IV_HEX) != 16:
-        print(" Invalid key/IV length")
-        print("   KEY should be 64 hex chars (32 bytes)")
-        print("   IV should be 16 hex chars (8 bytes)")
+        print("❌ Invalid key/IV length")
         return
     
     print("\n" + "="*80)
     
-    # Crear y arrancar GCS
     gcs = ChaChaGCS(host='127.0.0.1', port=5760)
     
     try:
         gcs.connect()
         gcs.init_crypto(KEY_HEX, IV_HEX)
-
-        print("\n[COMMANDS] Sending basic commands...\n")
-        gcs.set_mode('GUIDED')
-
-
         gcs.run()
     except KeyboardInterrupt:
         print("\n[GCS] Interrupted by user")
         gcs.stop()
     except Exception as e:
         print(f"[ERROR] {e}")
+        import traceback
+        traceback.print_exc()
         gcs.stop()
 
 if __name__ == '__main__':
