@@ -166,9 +166,22 @@ int main(void) {
     msg_original.msgid[1] = 0x2B;  // Byte medio
     msg_original.msgid[2] = 0x00; 
     
-    // Payload de ejemplo: "DATOS TELEMETRIA DR"
-    const char *payload_text = "DATOS TELEMETRIA DR";
-    memcpy(msg_original.payload, payload_text, msg_original.len);
+    // // Payload de ejemplo: "DATOS TELEMETRIA DR"
+    // const char *payload_text = "DATOS TELEMETRIA DR";
+    // memcpy(msg_original.payload, payload_text, msg_original.len);
+
+    unsigned char payload_real[44] = {
+    0x8f, 0x06, 0x8f, 0x06, 0x8f, 0x06, 0x8f, 0x06,
+    0x50, 0x00, 0x50, 0x00, 0x50, 0x00, 0x50, 0x00,
+    0x01, 0x00, 0x01, 0x00, 0x01, 0x00, 0x01, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0xf9, 0x49, 0xf9, 0x49, 0xf9, 0x49, 0xf9, 0x49,
+    0x20, 0x20, 0x20, 0x20
+    };
+    memcpy(msg_original.payload, payload_real, msg_original.len);
+
+    msg_original.checksum = 0x7935; 
+    
 
     print_message("MENSAJE ORIGINAL", &msg_original);
 
