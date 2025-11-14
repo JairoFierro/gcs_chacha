@@ -133,7 +133,7 @@ void print_message(const char *label, mavlink_message_t *msg) {
     printf("Seq: %d\n", msg->seq);
     printf("SysID: %d\n", msg->sysid);
     printf("CompID: %d\n", msg->compid);
-    printf("MsgID: %u\n", msg->msgid);
+    
 
     uint32_t msgid_value = msg->msgid[0] | (msg->msgid[1] << 8) | (msg->msgid[2] << 16);
     printf("MsgID: 0x%06X (%u)\n", msgid_value, msgid_value);
