@@ -20,7 +20,7 @@ typedef struct {
     uint8_t seq;
     uint8_t sysid;
     uint8_t compid;
-    uint32_t msgid[3];             // 3 bytes en realidad
+    uint8_t  msgid[3];             // 3 bytes en realidad
     uint8_t payload[255];       // Payload variable
     uint16_t checksum;
     uint8_t signature[13];      // Opcional
@@ -134,6 +134,10 @@ void print_message(const char *label, mavlink_message_t *msg) {
     printf("SysID: %d\n", msg->sysid);
     printf("CompID: %d\n", msg->compid);
     printf("MsgID: %u\n", msg->msgid);
+
+    uint32_t msgid_value = msg->msgid[0] | (msg->msgid[1] << 8) | (msg->msgid[2] << 16);
+    printf("MsgID: 0x%06X (%u)\n", msgid_value, msgid_value);
+    
     printf("Payload: ");
     for(int i = 0; i < msg->len; i++)
         printf("%02X ", msg->payload[i]);
