@@ -20,7 +20,7 @@ typedef struct {
     uint8_t seq;
     uint8_t sysid;
     uint8_t compid;
-    uint32_t msgid;             // 3 bytes en realidad
+    uint32_t msgid[3];             // 3 bytes en realidad
     uint8_t payload[255];       // Payload variable
     uint16_t checksum;
     uint8_t signature[13];      // Opcional
@@ -156,11 +156,15 @@ int main(void) {
     memset(&msg_original, 0, sizeof(msg_original));
     
     msg_original.magic = 0xFD;  // MAVLink v2
-    msg_original.len = 20;      // Payload de 20 bytes
-    msg_original.seq = 42;
+    msg_original.len = 44;      // Payload de 20 bytes
+    msg_original.seq = 0x8F;
     msg_original.sysid = 1;
     msg_original.compid = 1;
-    msg_original.msgid = 30;    // ATTITUDE
+    // msg_original.msgid = 30;    // ATTITUDE
+
+    msg_original.msgid[0] = 0x16;  // Byte bajo
+    msg_original.msgid[1] = 0x2B;  // Byte medio
+    msg_original.msgid[2] = 0x00; 
     
     // Payload de ejemplo: "DATOS TELEMETRIA DR"
     const char *payload_text = "DATOS TELEMETRIA DR";
